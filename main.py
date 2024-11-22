@@ -1,3 +1,4 @@
+import subprocess
 import asyncio
 import contextlib
 import logging
@@ -16,7 +17,6 @@ from modules.logs import add_logging_level
 with contextlib.redirect_stdout(None):
     import pygame
 
-version = "v2.0.0"
 database_name = 'fe2_companion_data.sqlite'
 
 # poggers
@@ -202,8 +202,16 @@ async def select_map(database: aiosqlite.Connection):
             logger.error("Invalid selection!")
 
 
+async def query_map_data(database: aiosqlite.Connection):
+    async with database.execute('SELECT * FROM maps') as cursor:
+        map_data = []
+        async for row in cursor:
+            map_data.append(row)
+        return map_data
+
 async def main():
-    logger.info(f"FE2 Companion {version} by pinheadtf2")
+    git_hash = subprocess.check_output(['git', 'rev-parse', '--short', 'HEAD']).decode('ascii').strip()
+    logger.info(f"FE2 Companion by pinheadtf2 [{git_hash}]")
 
     if not Path(database_name).exists():
         await create_database(database_name)

@@ -4,7 +4,12 @@ async def create_database(database_name: str):
     async with aiosqlite.connect(database_name) as database:
         await database.execute('''
             CREATE TABLE IF NOT EXISTS maps (
-                name TEXT not null primary key
+                name TEXT not null primary key,
+                song TEXT,
+                total_attempts integer NOT NULL,
+                total_completions integer NOT NULL,
+                best_attempt text NOT NULL,
+                best_completion text NOT NULL
             )
         ''')
 
