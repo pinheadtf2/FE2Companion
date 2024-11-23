@@ -1,10 +1,11 @@
-import subprocess
 import asyncio
 import contextlib
 import logging
+import subprocess
 import time
 from pathlib import Path
 from typing import List
+import json
 
 import aiosqlite
 import keyboard
@@ -96,6 +97,10 @@ play_strings = ["get ready: 1", "get ready: 2", "rescue", "100", "0:00"]
 stop_strings = ["round", "join", "next", "drowned"]
 escaped_strings = ["escaped"]
 
+# best templates
+template_best_attempt = {"attempt": 0, "time": 0}
+template_best_completion = {"attempt": 0, "time": 999999}
+
 
 async def find_select_music():
     music_files = list(
@@ -108,8 +113,7 @@ async def find_select_music():
         )
     )
     if len(music_files) == 0:
-        logger.warning("No music files detected in music folder! "
-                       "Music features will be unavailable, and this will only act as a tracker!")
+        logger.warning("No music files detected in music folder!")
         return None
     elif len(music_files) == 1:
         return music_files[0].__str__().replace(music_files[0].cwd().__str__(), "")[1:].replace("\\", "/")
@@ -120,7 +124,7 @@ async def find_select_music():
 
         while True:
             logger.info(f"{len(displayable_paths)} Songs Found! "
-                        f"Type the number for the song you want to play, or simply press enter for no music.\n"
+                        f"Type the number for the song you want this map to play, or simply press enter for no music.\n"
                         # f"{'=' * os.get_terminal_size().columns}"
                         f"")
             for i, dpath in enumerate(displayable_paths, 1):
@@ -128,6 +132,8 @@ async def find_select_music():
 
             try:
                 selection = input("\nSong Number (or enter): ")
+                if len(selection) == 0:
+                    return None
                 return displayable_paths[int(selection) - 1]
             except ValueError:
                 logger.error("Invalid selection!")
@@ -148,11 +154,16 @@ async def choose_volume():
 
 async def combine_images(images: List[ImageGrab]):
     widths, heights = zip(*[img.size for img in images])
-    new_img = Image.new('RGB', (max(widths), sum(heights)))
+    horizontal_padding = 300
+    vertical_padding = 150
+    image_width = max(widths) + horizontal_padding
+    image_height = sum(heights) + vertical_padding
+    new_img = Image.new('RGB', (image_width, image_height))
 
-    y_offset = 0
+    x_offset = int(horizontal_padding * 0.5)
+    y_offset = int(vertical_padding * 0.5)
     for img in images:
-        new_img.paste(img, (0, y_offset))
+        new_img.paste(img, (x_offset, y_offset))
         y_offset += img.height
 
     Path('images').mkdir(exist_ok=True)
@@ -164,8 +175,14 @@ async def submit_new_map(database: aiosqlite.Connection):
     if len(new_map) == 0:
         logger.error("Map name cannot be empty!")
         return await submit_new_map(database)
-    await database.execute('INSERT INTO maps VALUES(?)', [new_map])
+    song = await find_select_music()
+    best_attempt = template_best_attempt.copy()
+    best_completion = template_best_completion.copy()
+    await database.execute('INSERT INTO maps VALUES(?, ?, ?, ?, ?, ?)',
+                           [new_map, song, 0, 0, str(best_attempt), str(best_completion)])
     await database.commit()
+    return {'name': new_map, 'song': song, 'total_attempts': 0, 'total_completions': 0, 'best_attempt': best_attempt,
+            best_completion: best_completion}
 
 
 async def query_maps(database: aiosqlite.Connection):
@@ -179,68 +196,91 @@ async def query_maps(database: aiosqlite.Connection):
         return maps
 
 
-async def select_map(database: aiosqlite.Connection):
-    maps = await query_maps(database)
-
-    if len(maps) == 0:
-        logger.info("No maps found! Adding first map...\n")
-        await submit_new_map(database)
-        maps = await query_maps(database)
-    elif len(maps) == 1:
-        return maps[0]
-
+async def select_map_from_list(map_list: List[dict]):
     while True:
-        logger.info(f"{len(maps)} Maps Stored! "
+        logger.info(f"{len(map_list)} Maps Stored! "
                     f"Type the ID of the map you're playing on. For a new map, hit enter.\n")
-        for i, name in enumerate(maps, 1):
-            print(f"{i}. {name}")
+        for i, entry in enumerate(map_list, 1):
+            print(f"{i}. {entry['name']}")
 
         try:
-            selection = input("\nSong Number (or enter): ")
-            return maps[int(selection) - 1]
+            selection = input("\nMap ID (or enter): ")
+            return map_list[int(selection) - 1]
         except ValueError:
             logger.error("Invalid selection!")
 
 
-async def query_map_data(database: aiosqlite.Connection):
+async def query_map_table(database: aiosqlite.Connection):
     async with database.execute('SELECT * FROM maps') as cursor:
+        column_names = [description[0] for description in cursor.description]
         map_data = []
         async for row in cursor:
-            map_data.append(row)
+            row_dict = dict(zip(column_names, row))
+            map_data.append(row_dict)
         return map_data
+
+
+async def select_map(database: aiosqlite.Connection):
+    map_list = await query_map_table(database)
+    if len(map_list) == 0:
+        logger.info("No maps found! Adding first map...\n")
+        return await submit_new_map(database)
+    elif len(map_list) == 1:
+        return map_list[0]
+    else:
+        return await select_map_from_list(map_list)
+
+
+async def compare_run(compare_type: str, run_attempt: int, run_time: float, best_run: dict):
+    new_best = None
+    if compare_type == 'attempt':
+        if run_time > best_run['time']:
+            new_best = {"attempt": run_attempt, "time": run_time}
+    elif compare_type == 'completion':
+        if run_time < best_run['time']:
+            new_best = {"attempt": run_attempt, "time": run_time}
+    return new_best
+
 
 async def main():
     git_hash = subprocess.check_output(['git', 'rev-parse', '--short', 'HEAD']).decode('ascii').strip()
     logger.info(f"FE2 Companion by pinheadtf2 [{git_hash}]")
 
+    Path('music').mkdir(exist_ok=True)
     if not Path(database_name).exists():
         await create_database(database_name)
         logger.info(f"Created database {database_name}")
     database = await aiosqlite.connect(database_name)
 
+    selected_map = await select_map(database)
+    selected_map['best_attempt'] = json.loads(selected_map['best_attempt'])
+    selected_map['best_completion'] = json.loads(selected_map['best_completion'])
+
     pygame.mixer.init()
-    Path('music').mkdir(exist_ok=True)
-    music = await find_select_music()
-    if music:
-        pygame.mixer.music.load(music)
+    if not selected_map['song']:
+        pygame.mixer.music.load('music/Hyperspace - V2 - luxTypes.mp3')
+        volume = 0
+        pygame.mixer.music.set_volume(volume)
+    else:
+        pygame.mixer.music.load(selected_map['song'])
         volume = await choose_volume()
         pygame.mixer.music.set_volume(volume)
-        logger.info(f"Initialized music player with song {music} at volume {volume}")
-    else:
-        pygame.mixer.music.load(music)
-        pygame.mixer.music.set_volume(0)
-    selected_map = await select_map(database)
+    logger.info(f"Initialized music player with song {selected_map['song']} at volume {volume}")
 
     # this is where the session is officially declared as 'started'
     session_start = int(time.time())
-    best_attempt = {'attempt': 0, 'time': 0}
-    best_completion = {'attempt': 0, 'time': 999999}
+    session_best_attempt = template_best_attempt.copy()
+    session_best_completion = template_best_completion.copy()
     cursor = await database.execute('INSERT INTO sessions VALUES(?, ?, ?, ?, ?, ?, ?)',
-                                    [selected_map, session_start, None, 0, 0, str(best_attempt), str(best_completion)])
+                                    [selected_map['name'], session_start, None, 0, 0, str(session_best_attempt),
+                                     str(session_best_completion)])
     run_id = cursor.lastrowid
     await database.commit()
 
-    logger.success(f"Started session {run_id} with map {selected_map} and song {music} (vol {volume})")
+    logger.info(f"Started session {run_id} with map {selected_map['name']}\n"
+                f"{" " * 33}Map Totals: {selected_map['total_attempts']} attempts, {selected_map['total_completions']} completions\n"
+                f"{" " * 33}Map Best Attempt: {selected_map['best_attempt']['time']} (Att. {selected_map['best_attempt']['attempt']})\n"
+                f"{" " * 33}Map Best Completion: {selected_map['best_completion']['time']} (Att. {selected_map['best_completion']['attempt']})")
 
     running = False
     attempts = 0
@@ -267,42 +307,83 @@ async def main():
                 await asyncio.sleep(0.35)
 
             pygame.mixer.music.play()
-            attempts += 1
             run_start = time.time()
-            logger.match(f"Attempt {attempts} of {selected_map} (Song: {music})\n"
-                         f"    All Text: {text} | Matches: {match}")
+            attempts += 1
+            logger.match(f"Attempt {attempts} of {selected_map['name']}\n"
+                         f"{" " * 34}Matches: {match} | All Text: {text}")
             continue
         elif (any((match := partial) in text for partial in stop_strings) or keyboard.is_pressed('g')) and running:
             running = False
             pygame.mixer.music.stop()
             run_time = round(time.time() - run_start, 3)
-            if run_time > best_attempt['time']:
-                best_attempt = {'attempt': attempts, 'time': run_time}
-                logger.match(f"Stopped music after {run_time}\n"
-                             f"    New Best Attempt! Ran for {best_attempt['time']} seconds after {best_attempt['attempt']} runs\n"
-                             f"    All Text: {text} | Matches: {match}")
-                await database.execute('UPDATE sessions SET total_attempts = ?, best_attempt = ? WHERE rowid = ?',
-                                       [attempts, str(best_attempt), run_id])
+
+            session_attempt_comparison = await compare_run('attempt', attempts, run_time, session_best_attempt)
+            if session_attempt_comparison:
+                map_attempt_comparison = await compare_run('attempt', attempts, run_time, selected_map['best_attempt'])
+                if map_attempt_comparison:
+                    session_best_attempt = map_attempt_comparison
+                    selected_map['best_attempt'] = session_best_attempt
+                    logger.match(f"Stopped music after {run_time}\n"
+                                 f"{" " * 34}New Map Best Attempt! | Attempt #{attempts} lasted for {run_time} seconds\n"
+                                 f"{" " * 34}Matches: {match} | All Text: {text}")
+                    await database.execute('UPDATE sessions SET best_attempt = ? WHERE rowid = ?',
+                                           [str(session_best_attempt), run_id])
+                    await database.execute('UPDATE maps SET best_attempt = ? WHERE rowid = ?',
+                                           [str(session_best_attempt), run_id])
+                else:
+                    session_best_attempt = session_attempt_comparison
+                    logger.match(f"Stopped music after {run_time}\n"
+                                 f"{" " * 34}New Session Best Attempt! | Attempt #{attempts} lasted for {run_time} seconds\n"
+                                 f"{" " * 34}Map Best Attempt: {selected_map['best_attempt']['time']} seconds (S. Att. {selected_map['best_attempt']['attempt']})\n"
+                                 f"{" " * 34}Matches: {match} | All Text: {text}")
+                    await database.execute('UPDATE sessions SET best_attempt = ? WHERE rowid = ?',
+                                           [str(session_best_attempt), run_id])
             else:
                 logger.match(f"Stopped music after {run_time}\n"
-                             f"    All Text: {text} | Matches: {match}")
-                await database.execute('UPDATE sessions SET total_attempts = ? WHERE rowid = ?',
-                                       [attempts, run_id])
+                             f"{" " * 34}Map Best Attempt: {selected_map['best_attempt']['time']} seconds (Att. {selected_map['best_attempt']['attempt']})\n"
+                             f"{" " * 34}Session Best Attempt: {session_best_attempt['time']} seconds (S. Att. {session_best_attempt['attempt']})\n"
+                             f"{" " * 34}All Text: {text} | Matches: {match}")
+
+            await database.execute('UPDATE sessions SET total_attempts = ? WHERE rowid = ?',
+                                   [attempts, run_id])
+            await database.execute('UPDATE maps SET total_attempts = ? WHERE rowid = ?',
+                                   [selected_map['total_attempts'] + attempts, run_id])
             await database.commit()
         elif keyboard.is_pressed('c') and running:
             run_time = round(time.time() - run_start, 3)
             completions += 1
-            logger.success(
-                f"Escaped {selected_map} after {attempts} attempts with a time of {run_time} (Completion #{completions})")
 
-            if run_time < best_completion['time']:
-                best_completion = {'attempt': attempts, 'time': run_time}
-                await database.execute(
-                    'UPDATE sessions SET total_attempts = ?, total_completions = ?, best_completion = ? WHERE rowid = ?',
-                    [attempts, completions, str(best_completion), run_id])
+            session_completion_comparison = await compare_run('completion', completions, run_time, session_best_completion)
+            if session_completion_comparison:
+                map_completion_comparison = await compare_run('completion', completions, run_time, selected_map['best_completion'])
+                if map_completion_comparison:
+                    session_best_completion = map_completion_comparison
+                    logger.success(
+                        f"Escaped map {selected_map['name']} after {attempts} attempts with a time of {run_time} seconds\n"
+                        f"{" " * 37}This is your new map record! | Completions: {selected_map['completions'] + completions} ({completions} today)")
+                    await database.execute('UPDATE sessions SET best_completion = ? WHERE rowid = ?',
+                                           [str(session_best_completion), run_id])
+                    await database.execute('UPDATE maps SET best_completion = ? WHERE rowid = ?',
+                                           [str(session_best_completion), run_id])
+                else:
+                    session_best_completion = session_completion_comparison
+                    logger.success(
+                        f"Escaped map {selected_map['name']} after {attempts} attempts with a time of {run_time} seconds\n"
+                        f"This is a new session record! | Completions: {selected_map['completions'] + completions} ({completions} today)\n"
+                        f"Map Best Completion: {selected_map['best_completion']['time']} seconds (Att. {selected_map['best_completion']['attempt']})")
+                    await database.execute('UPDATE sessions SET best_completion = ? WHERE rowid = ?',
+                                           [str(session_best_completion), run_id])
             else:
-                await database.execute('UPDATE sessions SET total_attempts = ?, total_completions = ? WHERE rowid = ?',
-                                       [attempts, completions, run_id])
+                logger.success(
+                    f"Escaped map {selected_map['name']} after {attempts} attempts with a time of {run_time} seconds\n"
+                    f"{" " * 37}Map Best Completion: {selected_map['best_completion']['time']} seconds (Att. {selected_map['best_completion']['attempt']})\n"
+                    f"{" " * 37}Session Best Completion: {session_best_completion['time']} seconds (Att. {session_best_completion['attempt']})")
+
+            await database.execute('UPDATE sessions SET total_attempts = ?, total_completions = ? WHERE rowid = ?',
+                                   [attempts, completions, run_id])
+            await database.execute('UPDATE maps SET total_attempts = ?, total_completions = ? WHERE rowid = ?',
+                                   [selected_map['total_attempts'] + attempts,
+                                    selected_map['total_completions'] + completions, run_id])
             await database.commit()
             break
         elif keyboard.is_pressed('k'):
@@ -320,99 +401,9 @@ async def main():
     await database.close()
 
     logger.bye("See ya!")
+    return
 
 
 if __name__ == '__main__':
     asyncio.run(main())
-
-# if __name__ == "__main__":
-#     running = False
-#     run_start = None
-#     session_start = time.time()
-#     attempts = 0
-#     pygame.mixer.init()
-#     pygame.mixer.music.load(song)
-#     pygame.mixer.music.set_volume(volume)
-#     logger.info(f"Initialized player with song '{song}' at volume {volume}")
-#
-#     session = dict()
-#     session["session_start"] = time.time()
-#
-#     best_attempt = dict()
-#     best_attempt['attempt'] = attempts - 1
-#     best_attempt['time'] = 1
-#
-#     best_completion = dict()
-#     best_completion['attempt'] = None
-#     best_completion['time'] = None
-#
-#     session["total_completions"] = 0
-#     session["best_attempt"] = best_attempt
-#     session["best_completion"] = best_completion
-#
-#     while True:
-#         # perf_start = perf_counter()
-#         # get ready from 350, 870, 1000, 1000
-#         # notifs box from 600, 0, 1400, 250
-#         # rescue box from 700, 870, 1250, 990
-#         image_ready = ImageGrab.grab(bbox=(320, 850, 1000, 1000))
-#         image_notifications = ImageGrab.grab(bbox=(600, 0, 1300, 300))
-#         image_rescue = ImageGrab.grab(bbox=(700, 870, 1250, 990))
-#         image_share = ImageGrab.grab(bbox=(150, 0, 550, 50))
-#
-#         # image_ready.save(f"images/image_ready_{time.time()}.png")
-#         # image_notifications.save(f"images/image_notifications_{time.time()}.png")
-#         # image_rescue.save(f"images/image_rescue_{time.time()}.png")
-#
-#         all_text = ""
-#         for image in (image_ready, image_notifications, image_rescue, image_share):
-#             text = pytesseract.image_to_string(image)
-#             all_text = all_text + " " + text
-#         all_text = all_text.strip().replace("\n", " ").lower()
-#
-#         # screenshot = ImageGrab.grab(bbox=(0, 0, 1920, 1080))
-#         # text = pytesseract.image_to_string(screenshot)
-#         # text = text.lower()
-#
-#         if (any(partial in all_text for partial in play_strings) or keyboard.is_pressed(']')) and not running:
-#             running = True
-#             if "fe2.io" in all_text:
-#                 logger.info("big delay")
-#                 time.sleep(0.8)
-#             elif "get ready: 2" in all_text:
-#                 logger.info("delay")
-#                 time.sleep(0.35)
-#             pygame.mixer.music.play()
-#             attempts += 1
-#             run_start = time.time()
-#             logger.info(f"Playing {song} | Attempt {attempts}\n"
-#                         f"    All Text: " + all_text.strip().replace("\n", " "))
-#             continue
-#         elif (any(partial in all_text for partial in stop_strings) or keyboard.is_pressed('g')) and running:
-#             running = False
-#             pygame.mixer.music.stop()
-#             run_time = time.time() - run_start
-#             logger.info(f"Stopped music after {run_time}\n"
-#                         f"    All Text: " + all_text.strip().replace("\n", " "))
-#         elif keyboard.is_pressed('c') and running:
-#             running = False
-#             run_time = time.time() - run_start
-#             readable_time = datetime.datetime.fromtimestamp(run_time).strftime("%H:%M:%S.%f")[:-3]
-#             logger.info(f"Escaped map with time {run_time} after {attempts} attempts ({readable_time})\n"
-#                         f"    All Text: " + all_text.strip().replace("\n", " "))
-#             break
-#         elif keyboard.is_pressed('k'):
-#             if pygame.mixer.music.get_busy():
-#                 pygame.mixer.music.stop()
-#             break
-#         # perf_stop = perf_counter()
-#         # perf_debug.append((perf_stop - perf_start, perf_stop, perf_start))
-#
-#     # with open('debug.txt', 'w') as f:
-#     #     for line in perf_debug:
-#     #         f.write(f"{line}\n")
-#
-#     while pygame.mixer.music.get_busy():
-#         pygame.time.wait(1000)
-#
-#     session["total_attempts"] = attempts
+    exit(0)
