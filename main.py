@@ -26,9 +26,8 @@ database_name = 'fe2_companion_data.sqlite'
 pytesseract.pytesseract.tesseract_cmd = r'C:\Program Files\Tesseract-OCR\tesseract.exe'
 
 # strings
-play_strings = ["get ready: ", "rescue", "100", "0:00"]
+play_strings = ["get ready: ", "rescue"]
 stop_strings = ["round", "join", "next", "drowned"]
-escaped_strings = ["escaped"]
 
 # poggers
 add_logging_level('SUCCESS', 21)
@@ -268,10 +267,12 @@ async def compare_run(compare_type: str, run_attempt: int, run_time: float, best
     return new_best
 
 
-async def check_distance(target_word: str, word_list: List[str], max_distance):
+async def check_distance(target_word: str, word_list: List[str], max_distance: int):
     for entry in word_list:
+        if '..' in target_word or 'get ready..' in target_word:
+            continue
         distance = DamerauLevenshtein.distance(target_word, entry)
-        logger.debug(f"{entry} is {distance} from {target_word}")
+        # logger.debug(f"{entry} is {distance} from {target_word}")
         if distance <= max_distance:
             return True
 
@@ -365,7 +366,7 @@ async def main():
                     session_best_attempt = map_attempt_comparison
                     selected_map['best_attempt'] = session_best_attempt
                     logger.match(f"Stopped music after {run_time}\n"
-                                 f"{" " * 34}New Map Best Attempt! | Attempt #{attempts} lasted for {run_time} seconds\n"
+                                 f"{" " * 34}This is a new map best attempt! | Attempt #{attempts} lasted for {run_time} seconds\n"
                                  f"{" " * 34}Matches: {match} | All Text: {text}")
                     await database.execute('UPDATE sessions SET best_attempt = ? WHERE rowid = ?',
                                            [json.dumps(session_best_attempt), run_id])
@@ -374,7 +375,7 @@ async def main():
                 else:
                     session_best_attempt = session_attempt_comparison
                     logger.match(f"Stopped music after {run_time}\n"
-                                 f"{" " * 34}New Session Best Attempt! | Attempt #{total_attempts} lasted for {run_time} seconds\n"
+                                 f"{" " * 34}This is a new session best attempt! | Attempt #{total_attempts} lasted for {run_time} seconds\n"
                                  f"{" " * 34}Map Best Attempt: {selected_map['best_attempt']['time']} seconds (S. Att. {selected_map['best_attempt']['attempt']})\n"
                                  f"{" " * 34}Matches: {match} | All Text: {text}")
                     await database.execute('UPDATE sessions SET best_attempt = ? WHERE rowid = ?',
@@ -390,7 +391,7 @@ async def main():
             await database.execute('UPDATE maps SET total_attempts = ? WHERE rowid = ?',
                                    [total_attempts, selected_map['rowid']])
             await database.commit()
-        elif keyboard.is_pressed('c') and running:
+        elif (keyboard.is_pressed('c') or re.search(r"(\d+)/(\d+) escaped", text)) and running:
             run_time = round(time.time() - run_start, 3)
             completions += 1
             total_attempts = selected_map['total_attempts'] + attempts
@@ -408,7 +409,8 @@ async def main():
                     session_best_completion = map_completion_comparison
                     logger.success(
                         f"Escaped map {selected_map['name']} after {attempts} attempts with a time of {run_time} seconds\n"
-                        f"{" " * 37}This is your new map record! | Completions: {selected_map['total_completions'] + completions} ({completions} today)")
+                        f"{" " * 37}This is your new map record! | Completions: {selected_map['total_completions'] + completions} ({completions} today)\n"
+                        f"{" " * 37}All Text: {text}")
                     await database.execute('UPDATE sessions SET best_completion = ? WHERE rowid = ?',
                                            [json.dumps(session_best_completion), run_id])
                     await database.execute('UPDATE maps SET best_completion = ? WHERE rowid = ?',
@@ -417,15 +419,17 @@ async def main():
                     session_best_completion = session_completion_comparison
                     logger.success(
                         f"Escaped map {selected_map['name']} after {attempts} attempts with a time of {run_time} seconds\n"
-                        f"This is a new session record! | Completions: {selected_map['total_completions'] + completions} ({completions} today)\n"
-                        f"Map Best Completion: {selected_map['best_completion']['time']} seconds (Att. {selected_map['best_completion']['attempt']})")
+                        f"{" " * 37}This is a new session record! | Completions: {selected_map['total_completions'] + completions} ({completions} today)\n"
+                        f"{" " * 37}Map Best Completion: {selected_map['best_completion']['time']} seconds (Att. {selected_map['best_completion']['attempt']})\n"
+                        f"{" " * 37}All Text: {text}")
                     await database.execute('UPDATE sessions SET best_completion = ? WHERE rowid = ?',
                                            [json.dumps(session_best_completion), run_id])
             else:
                 logger.success(
                     f"Escaped map {selected_map['name']} after {attempts} attempts with a time of {run_time} seconds\n"
                     f"{" " * 37}Map Best Completion: {selected_map['best_completion']['time']} seconds (Att. {selected_map['best_completion']['attempt']})\n"
-                    f"{" " * 37}Session Best Completion: {session_best_completion['time']} seconds (Att. {session_best_completion['attempt']})")
+                    f"{" " * 37}Session Best Completion: {session_best_completion['time']} seconds (Att. {session_best_completion['attempt']})\n"
+                    f"{" " * 37}All Text: {text}")
 
             await database.execute('UPDATE sessions SET total_attempts = ?, total_completions = ? WHERE rowid = ?',
                                    [attempts, completions, run_id])
@@ -434,10 +438,9 @@ async def main():
                                     total_completions, selected_map['rowid']])
             await database.commit()
             break
-        elif keyboard.is_pressed('k'):
+        elif keyboard.is_pressed('k') or keyboard.is_pressed('m'):
             pygame.mixer.music.stop()
             break
-
         perf_end = time.perf_counter()
         logger.debug(f"{perf_end - perf_start:.5f} seconds | Text: {text}")
 
@@ -451,6 +454,9 @@ async def main():
                            [session_end, run_id])
     await database.close()
     logger.info(f'Session ended! Duration: {session_end - session_start} seconds')
+
+    if keyboard.is_pressed('m'):
+        return await main()
 
     logger.bye("See ya!")
     return
