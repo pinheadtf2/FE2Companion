@@ -278,8 +278,9 @@ async def check_distance(target_word: str, word_list: List[str], max_distance: i
 
 
 async def main():
-    git_hash = subprocess.check_output(['git', 'rev-parse', '--short', 'HEAD']).decode('ascii').strip()
-    logger.info(f"FE2 Companion by pinheadtf2 [{git_hash}]")
+    # git_hash = subprocess.check_output(['git', 'rev-parse', '--short', 'HEAD']).decode('ascii').strip()
+    # logger.info(f"FE2 Companion by pinheadtf2 [{git_hash}]")
+    logger.info(f"FE2 Companion by pinheadtf2")
 
     Path('images/completions').mkdir(exist_ok=True)
     Path('music').mkdir(exist_ok=True)
